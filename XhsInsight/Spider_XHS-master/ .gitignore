@@ -1,0 +1,17 @@
+# 忽略系统文件
+.DS_Store
+__pycache__/
+
+# 忽略敏感数据
+xhs_history.db    # 你的本地数据库
+static/images/* # 下载的图片
+!static/images/.gitkeep
+
+# 忽略爬虫缓存
+Spider_XHS-master/
+# (可选) 如果你想保留爬虫代码，就把上面这行删掉。
+# 但通常爬虫是第三方库，最好只保留你自己写的适配器。
+# 不过鉴于你改了路径，建议保留爬虫代码，但忽略下面的：
+
+# 忽略个人配置
+*.env

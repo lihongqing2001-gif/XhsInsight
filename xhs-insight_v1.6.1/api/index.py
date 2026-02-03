@@ -188,8 +188,13 @@ def analyze_note(request: NoteRequest, db: Session = Depends(get_db), current_us
             client = genai.Client(api_key=api_key)
             prompt = f"Analyze Xiaohongshu note.\nTitle: {raw_data.get('title')}\nContent: {raw_data.get('desc')}\nReturn JSON with viral_reasons(3), improvements(2), psychology."
             
-            # Using Gemini 3.0 Flash Preview as requested
-            response = client.models.generate_content(model='gemini-3-flash-preview', contents=prompt)
+            try:
+                # Primary: Gemini 3.0 Flash Preview
+                response = client.models.generate_content(model='gemini-3-flash-preview', contents=prompt)
+            except Exception as e:
+                print(f"⚠️ Gemini 3.0 Failed: {e}. Switching to Gemini 2.5.")
+                # Fallback: Gemini 2.5 Flash
+                response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
             
             # Simplified mock parsing for stability
             ai_result["viral_reasons"] = ["AI Analysis Successful", "Engaging Title"]

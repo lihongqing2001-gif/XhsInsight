@@ -12,26 +12,32 @@ root_dir = os.path.abspath(os.path.join(current_dir, '..'))
 if root_dir not in sys.path:
     sys.path.append(root_dir)
 
-# Import the wrapper from the root directory
+# --- Wrapper Loading Logic ---
+xhs_ai_wrapper = None
+WRAPPER_ERROR = None
+
+class MockWrapper:
+    def get_note_detail(self, url, cookie):
+        if cookie and "invalid" in cookie: raise Exception("401 Unauthorized")
+        return {
+            "title": "测试笔记 (Mock Data / 爬虫不可用)", 
+            "desc": f"系统提示: 真实爬虫加载失败，正在使用模拟数据。\n原因: {WRAPPER_ERROR}\n\n这通常是因为部署环境(如Vercel)缺少 Node.js 运行时，导致 PyExecJS 无法执行 JS 签名。请在本地 Python 环境运行以体验完整功能。",
+            "images_list": ["https://picsum.photos/400/600"],
+            "likes": 999, "collected": 888, "comments": 777,
+            "user": {"nickname": "系统提示", "avatar": "", "userid": "0"}
+        }
+
 try:
-    import xhs_ai_wrapper
-    print("Successfully imported xhs_ai_wrapper from root")
-except ImportError as e:
-    print(f"Warning: Could not import xhs_ai_wrapper. Error: {e}")
+    # Attempt to import
+    import xhs_ai_wrapper as wrapper_module
+    xhs_ai_wrapper = wrapper_module.XHS_Wrapper()
+    print("✅ Successfully initialized xhs_ai_wrapper")
+except Exception as e:
+    WRAPPER_ERROR = str(e)
+    print(f"⚠️ Warning: Could not import or initialize xhs_ai_wrapper.\nError: {e}")
     print(f"Current sys.path: {sys.path}")
-    
-    # Mock Wrapper for build time or if file is missing during dev
-    class MockWrapper:
-        def get_note_detail(self, url, cookie):
-            if cookie and "invalid" in cookie: raise Exception("401 Unauthorized")
-            return {
-                "title": "测试笔记 (Mock Data)", 
-                "desc": "无法加载 xhs_ai_wrapper.py。请确保该文件位于项目根目录，并且 Spider_XHS-master 文件夹存在。",
-                "images_list": ["https://picsum.photos/400/600"],
-                "likes": 999, "collected": 888, "comments": 777,
-                "user": {"nickname": "系统提示", "avatar": "", "userid": "0"}
-            }
     xhs_ai_wrapper = MockWrapper()
+
 
 def get_valid_cookie(db: Session, user_id: int):
     """

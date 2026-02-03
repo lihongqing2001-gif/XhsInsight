@@ -72,7 +72,8 @@ class XHS_Wrapper:
                 
         except Exception as e:
             self.js_runtime_available = False
-            logger.warning(f"⚠️ JS Runtime Check Failed: {e}. Crawler will not work. System will use Mock Mode.")
+            # Downgraded to warning as this is expected in some environments (like Vercel)
+            logger.warning(f"⚠️ JS Runtime Check Failed: {e}. Crawler will switch to Mock Mode if used.")
 
     @contextmanager
     def _spider_context(self):
@@ -107,12 +108,12 @@ class XHS_Wrapper:
                 self.api_instance = XHS_Apis()
                 return self.api_instance
             except ImportError as e:
-                logger.error(f"❌ Failed to import XHS_Apis: {e}")
+                logger.warning(f"⚠️ Failed to import XHS_Apis (Missing dependencies?): {e}")
                 # Mark runtime as unavailable if import fails likely due to js deps
                 self.js_runtime_available = False
                 raise RuntimeError(f"RuntimeUnavailableError: {str(e)}")
             except Exception as e:
-                logger.error(f"❌ Failed to initialize XHS_Apis: {e}")
+                logger.warning(f"⚠️ Failed to initialize XHS_Apis: {e}")
                 self.js_runtime_available = False
                 raise RuntimeError(f"RuntimeUnavailableError: {str(e)}")
 

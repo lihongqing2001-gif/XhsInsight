@@ -188,7 +188,8 @@ def analyze_note(request: NoteRequest, db: Session = Depends(get_db), current_us
             client = genai.Client(api_key=api_key)
             prompt = f"Analyze Xiaohongshu note.\nTitle: {raw_data.get('title')}\nContent: {raw_data.get('desc')}\nReturn JSON with viral_reasons(3), improvements(2), psychology."
             
-            response = client.models.generate_content(model='gemini-2.0-flash-exp', contents=prompt)
+            # Update: Switching to gemini-3-flash-preview as requested
+            response = client.models.generate_content(model='gemini-3-flash-preview', contents=prompt)
             
             # Simplified mock parsing for stability
             ai_result["viral_reasons"] = ["AI Analysis Successful", "Engaging Title"]

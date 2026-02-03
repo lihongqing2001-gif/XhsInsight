@@ -1,0 +1,5 @@
+{
+  "name": "XHS-Insight",
+  "description": "A SaaS-ready AI analysis platform for Xiaohongshu (Little Red Book) content. Features automated crawling, multi-account cookie management, and deep content analysis using Google Gemini.",
+  "requestFramePermissions": []
+}

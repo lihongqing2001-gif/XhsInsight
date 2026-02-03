@@ -1,115 +1,185 @@
-import os
+# -*- coding: utf-8 -*-
+"""
+@File    : xhs_ai_wrapper.py
+@Description : 小红书爬虫通用接口（运行时路径自动纠正版 - Lazy Import + Runtime Check）
+"""
 import sys
-from sqlalchemy.orm import Session
-from datetime import datetime
-from typing import Optional
-from .models import Cookie
+import os
+from loguru import logger
+from dotenv import load_dotenv
+from contextlib import contextmanager
 
-# Critical for Vercel: Add the project root directory to sys.path
-# This allows importing 'xhs_ai_wrapper' which resides in the root
-current_dir = os.path.dirname(__file__)
-root_dir = os.path.abspath(os.path.join(current_dir, '..'))
-if root_dir not in sys.path:
-    sys.path.append(root_dir)
+# ================= 动态路径加载 =================
+base_dir = os.path.dirname(os.path.abspath(__file__))
+possible_spider_names = ["Spider_XHS", "Spider_XHS-master", "Spider"]
+spider_root_path = None
 
-# --- Wrapper Loading Logic ---
-xhs_ai_wrapper = None
-WRAPPER_ERROR = None
+for name in possible_spider_names:
+    p = os.path.join(base_dir, name)
+    if os.path.exists(p) and os.path.exists(os.path.join(p, "apis")):
+        spider_root_path = p
+        break
 
-class MockWrapper:
-    """
-    Fallback wrapper used when the real crawler cannot run 
-    (e.g., missing Node.js runtime for JS signature generation).
-    """
-    def get_note_detail(self, url, cookie):
-        # Simulate unauthorized if cookie is explicitly invalid
-        if cookie and "invalid" in cookie: 
-            raise Exception("401 Unauthorized")
-            
-        return {
-            "title": "测试笔记 (Mock Data / 环境限制)", 
-            "desc": f"【系统提示】\n检测到当前运行环境（如 Vercel Serverless）缺少 Node.js 运行时，导致爬虫无法执行 JavaScript 签名。\n\n系统已自动切换至演示模式。\n\n若需使用真实爬虫功能，请在本地环境运行，或部署至支持 Docker/Node.js 的服务器。",
-            "images_list": ["https://picsum.photos/400/600"],
-            "likes": 1234, 
-            "collected": 567, 
-            "comments": 89,
-            "user": {"nickname": "系统提示", "avatar": "https://picsum.photos/50/50", "userid": "0"}
-        }
+if spider_root_path:
+    # Add spider path to sys.path so we can import its modules later
+    if spider_root_path not in sys.path:
+        sys.path.append(spider_root_path)
+else:
+    logger.warning("❌ 未找到爬虫文件夹！将无法使用真实爬虫功能。")
 
-try:
-    # Attempt to import
-    import xhs_ai_wrapper as wrapper_module
-    xhs_ai_wrapper = wrapper_module.XHS_Wrapper()
-    print("✅ Successfully initialized xhs_ai_wrapper")
-except Exception as e:
-    WRAPPER_ERROR = str(e)
-    print(f"⚠️ Warning: Could not import or initialize xhs_ai_wrapper.\nError: {e}")
-    xhs_ai_wrapper = MockWrapper()
+# ===============================================
 
-
-def get_valid_cookie(db: Session, user_id: int):
-    """
-    Round-robin selection of valid cookies for a user.
-    """
-    cookie = db.query(Cookie).filter(
-        Cookie.user_id == user_id,
-        Cookie.is_valid == True
-    ).order_by(Cookie.last_used.asc()).first()
-    
-    if not cookie:
-        raise Exception("COOKIE_EXHAUSTED")
+class XHS_Wrapper:
+    def __init__(self):
+        """ 初始化：从爬虫文件夹内部加载 .env Cookie """
+        self.spider_path = spider_root_path
+        self.js_runtime_available = True  # Assume true initially
         
-    cookie.last_used = datetime.utcnow()
-    db.commit()
-    return cookie
+        if not self.spider_path:
+             logger.error("Spider path not set. Wrapper initialized in broken state.")
+             self.cookie = None
+             return
 
-def fetch_xhs_data(db: Session, user_id: Optional[int], url: str, manual_cookie: Optional[str] = None):
-    """
-    Attempts to fetch data using the root xhs_ai_wrapper.
-    Handles 'RuntimeUnavailableError' (missing Node.js) by falling back to Mock data.
-    """
-    
-    def _safe_fetch(cookie_val):
-        try:
-            return xhs_ai_wrapper.get_note_detail(url, cookie_val)
-        except Exception as e:
-            error_msg = str(e)
-            # Catch ExecJS runtime error (missing Node.js)
-            if "JavaScript runtime" in error_msg or "RuntimeUnavailableError" in error_msg:
-                print(f"⚠️ Runtime missing (ExecJS). Falling back to Mock.")
-                return MockWrapper().get_note_detail(url, cookie_val)
-            raise e
+        env_path = os.path.join(self.spider_path, ".env")
+        
+        # Load Env
+        if os.path.exists(env_path):
+            load_dotenv(env_path, override=True)
+            self.cookie = os.getenv("COOKIES")
+        else:
+            self.cookie = None
+        
+        self.api_instance = None
+        # Check ExecJS early to avoid verbose stack traces later
+        self._check_js_runtime()
+        logger.info(f"✅ 爬虫 Wrapper 初始化完成 (Runtime Available: {self.js_runtime_available})")
 
-    # --- Local Mode / Direct Test ---
-    if manual_cookie or (not user_id):
+    def _check_js_runtime(self):
+        """Pre-check if a JS runtime (Node.js) is available."""
         try:
-            # Use manual cookie or a placeholder if testing connectivity
-            return _safe_fetch(manual_cookie or "demo_cookie")
+            import execjs
+            # Try to get the runtime. This usually raises RuntimeUnavailableError if no node.
+            runtime = execjs.get() 
+            # Try a simple compile to be sure
+            ctx = execjs.compile("function test() { return 1+1; }")
+            if ctx.call("test") != 2:
+                raise Exception("JS Execution failed")
         except Exception as e:
-            raise Exception(f"爬取失败: {str(e)}")
+            self.js_runtime_available = False
+            logger.warning(f"⚠️ JS Runtime Check Failed: {e}. Crawler will not work. System will use Mock Mode.")
 
-    # --- DB User Path (Rotation) ---
-    max_retries = 3
-    attempt = 0
-    
-    while attempt < max_retries:
+    @contextmanager
+    def _spider_context(self):
+        """
+        【核心修复】上下文管理器：
+        在执行代码块前，自动跳进爬虫目录；
+        执行完后，自动跳回原目录。
+        """
+        if not self.spider_path:
+            yield
+            return
+
+        original_cwd = os.getcwd()
         try:
-            cookie_obj = get_valid_cookie(db, user_id)
-        except Exception as e:
-            raise e # No cookies left
+            os.chdir(self.spider_path)
+            yield
+        finally:
+            os.chdir(original_cwd)
+
+    def _get_api(self):
+        """ Lazy Loader for API Instance """
+        if not self.js_runtime_available:
+            raise RuntimeError("Environment missing Node.js/ExecJS runtime.")
+
+        if self.api_instance:
+            return self.api_instance
             
-        try:
-            return _safe_fetch(cookie_obj.value)
-            
-        except Exception as e:
-            error_msg = str(e)
-            if "401" in error_msg or "Unauthorized" in error_msg:
-                cookie_obj.is_valid = False
-                cookie_obj.failure_count += 1
-                db.commit()
-                attempt += 1
-                continue
-            else:
+        with self._spider_context():
+            try:
+                from apis.xhs_pc_apis import XHS_Apis
+                self.api_instance = XHS_Apis()
+                return self.api_instance
+            except ImportError as e:
+                logger.error(f"❌ Failed to import XHS_Apis: {e}")
                 raise e
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize XHS_Apis: {e}")
+                raise e
+
+    def search_notes(self, keyword: str, limit: int = 10, sort_type: int = 0) -> dict:
+        """ 搜索笔记 """
+        if not self.spider_path: return self._fail("爬虫目录未找到")
+        if not self.js_runtime_available: raise RuntimeError("RuntimeUnavailableError: Missing Node.js")
+
+        with self._spider_context():
+            try:
+                api = self._get_api()
+                success, msg, notes_raw = api.search_some_note(
+                    keyword, limit, self.cookie, sort_type, 
+                    0, 0, 0, 0, None, None
+                )
                 
-    raise Exception("Max retries exceeded or all cookies failed.")
+                if not success:
+                    return self._fail(msg)
+
+                clean_notes = []
+                for note in notes_raw:
+                    if note.get('model_type') == 'note':
+                        clean_notes.append({
+                            "id": note.get('id'),
+                            "title": note.get('title', '无标题'),
+                            "link": f"https://www.xiaohongshu.com/explore/{note.get('id')}?xsec_token={note.get('xsec_token','')}",
+                            "likes": note.get('liked_count', 0),
+                            "user": note.get('user', {}).get('nickname', '')
+                        })
+                return self._success(clean_notes, "search_result")
+            except Exception as e:
+                return self._fail(str(e))
+
+    def get_note_detail(self, note_url: str, cookie: str = None) -> dict:
+        """ 获取单篇笔记详情 """
+        if not self.spider_path: return self._fail("爬虫目录未找到")
+        if not self.js_runtime_available: raise RuntimeError("RuntimeUnavailableError: Missing Node.js")
+        
+        use_cookie = cookie if cookie else self.cookie
+
+        with self._spider_context():
+            try:
+                api = self._get_api()
+                success, msg, res = api.get_note_info(note_url, use_cookie)
+                if not success:
+                    return self._fail(msg)
+
+                data = res.get('data', {})
+                items = data.get('items', [data])
+                if not items: return self._fail("无数据")
+                
+                note = items[0].get('note_card', items[0])
+                
+                images = []
+                for img in note.get('image_list', []):
+                    if img.get('info_list'):
+                        url = img['info_list'][0].get('url', '')
+                        if url.startswith('//'): url = 'https:' + url
+                        images.append(url)
+
+                result = {
+                    "title": note.get('title'),
+                    "desc": note.get('desc'),
+                    "images_list": images,
+                    "likes": note.get('interact_info', {}).get('liked_count', 0),
+                    "collected": note.get('interact_info', {}).get('collected_count', 0),
+                    "comments": note.get('interact_info', {}).get('comment_count', 0),
+                    "user": note.get('user', {})
+                }
+                return result # Direct return for service use
+            except Exception as e:
+                # logger.error(f"Error in get_note_detail: {e}") 
+                # Suppress error log here because api/crawler_service.py handles it
+                raise e
+
+    def _success(self, data, type_name):
+        return {"status": "success", "type": type_name, "data": data}
+
+    def _fail(self, msg):
+        return {"status": "error", "message": str(msg)}

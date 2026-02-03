@@ -19,14 +19,16 @@ def _get_mock_wrapper():
         
     class MockWrapper:
         def get_note_detail(self, url, cookie):
+            # Simulate 401 if specifically requested via cookie note
             if cookie and "invalid" in cookie: 
                 raise Exception("401 Unauthorized")
+            
             return {
-                "title": "测试笔记 (Mock/环境限制模式)", 
-                "desc": f"【系统提示】\n检测到当前环境无法运行爬虫核心组件(通常是因为缺少Node.js运行时)。\n\n系统已自动切换至演示模式。\n\nURL: {url}",
-                "images_list": ["https://picsum.photos/400/600"],
+                "title": "测试笔记 (环境限制/Mock模式)", 
+                "desc": f"【系统提示】\n检测到当前服务器环境无法运行 JavaScript (缺少 Node.js)，已自动切换至演示模式。\n\n请求URL: {url}\n\n这通常发生在 Vercel 等 Serverless 环境中。如需真实抓取，请在本地使用 Docker 或安装 Node.js 后运行。",
+                "images_list": ["https://picsum.photos/400/600", "https://picsum.photos/400/601"],
                 "likes": 1234, "collected": 567, "comments": 89,
-                "user": {"nickname": "系统提示", "avatar": "https://picsum.photos/50/50", "userid": "0"}
+                "user": {"nickname": "系统演示账号", "avatar": "https://picsum.photos/50/50", "userid": "0"}
             }
     _MockWrapperClass = MockWrapper
     return MockWrapper()
@@ -69,14 +71,27 @@ def get_valid_cookie(db: Session, user_id: int):
 
 def fetch_xhs_data(db: Session, user_id: Optional[int], url: str, manual_cookie: Optional[str] = None):
     """
-    Fetches data using the lazy-loaded crawler instance.
+    Fetches data using the lazy-loaded crawler instance with robust fallback.
     """
     crawler = _get_crawler()
-    
+    mock_crawler = _get_mock_wrapper()
+
+    def safe_crawl(target_url, cookie_val):
+        """Attempts crawl, falls back to mock if JS runtime is missing."""
+        try:
+            return crawler.get_note_detail(target_url, cookie_val)
+        except Exception as e:
+            err_msg = str(e)
+            # Detect Missing Node.js / ExecJS errors
+            if any(x in err_msg for x in ["JavaScript runtime", "RuntimeUnavailable", "Program", "execjs", "node"]):
+                print(f"⚠️ Runtime Error ({err_msg}). Falling back to Mock Data.")
+                return mock_crawler.get_note_detail(target_url, "mock_fallback")
+            raise e
+
     # 1. Local Mode / Manual Cookie
     if manual_cookie or (not user_id):
         try:
-            return crawler.get_note_detail(url, manual_cookie or "demo_cookie")
+            return safe_crawl(url, manual_cookie or "demo_cookie")
         except Exception as e:
             raise Exception(f"爬取失败: {str(e)}")
 
@@ -91,7 +106,7 @@ def fetch_xhs_data(db: Session, user_id: Optional[int], url: str, manual_cookie:
             raise e # No cookies left
             
         try:
-            return crawler.get_note_detail(url, cookie_obj.value)
+            return safe_crawl(url, cookie_obj.value)
         except Exception as e:
             error_msg = str(e)
             if "401" in error_msg or "Unauthorized" in error_msg:

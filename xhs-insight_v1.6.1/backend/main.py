@@ -246,11 +246,19 @@ def analyze_note(request: NoteRequest, db: Session = Depends(get_db), current_us
             3. 'psychology': The target audience psychology.
             """
             
-            # Using Gemini 3.0 Flash Preview as requested
-            response = client.models.generate_content(
-                model='gemini-3-flash-preview',
-                contents=prompt
-            )
+            try:
+                # Primary: Gemini 3.0
+                response = client.models.generate_content(
+                    model='gemini-3-flash-preview',
+                    contents=prompt
+                )
+            except Exception as e:
+                print(f"⚠️ Gemini 3.0 Failed: {e}. Switching to Gemini 2.5.")
+                # Fallback: Gemini 2.5
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt
+                )
             
             # Simple mock parsing for demo resilience
             # In a real app, you would parse the JSON string from response.text

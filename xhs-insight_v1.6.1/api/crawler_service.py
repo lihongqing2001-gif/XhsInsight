@@ -17,14 +17,23 @@ xhs_ai_wrapper = None
 WRAPPER_ERROR = None
 
 class MockWrapper:
+    """
+    Fallback wrapper used when the real crawler cannot run 
+    (e.g., missing Node.js runtime for JS signature generation).
+    """
     def get_note_detail(self, url, cookie):
-        if cookie and "invalid" in cookie: raise Exception("401 Unauthorized")
+        # Simulate unauthorized if cookie is explicitly invalid
+        if cookie and "invalid" in cookie: 
+            raise Exception("401 Unauthorized")
+            
         return {
-            "title": "测试笔记 (Mock Data / 爬虫不可用)", 
-            "desc": f"系统提示: 真实爬虫加载失败，正在使用模拟数据。\n原因: {WRAPPER_ERROR}\n\n这通常是因为部署环境(如Vercel)缺少 Node.js 运行时，导致 PyExecJS 无法执行 JS 签名。请在本地 Python 环境运行以体验完整功能。",
+            "title": "测试笔记 (Mock Data / 环境限制)", 
+            "desc": f"【系统提示】\n检测到当前运行环境（如 Vercel Serverless）缺少 Node.js 运行时，导致爬虫无法执行 JavaScript 签名。\n\n系统已自动切换至演示模式。\n\n若需使用真实爬虫功能，请在本地环境运行，或部署至支持 Docker/Node.js 的服务器。",
             "images_list": ["https://picsum.photos/400/600"],
-            "likes": 999, "collected": 888, "comments": 777,
-            "user": {"nickname": "系统提示", "avatar": "", "userid": "0"}
+            "likes": 1234, 
+            "collected": 567, 
+            "comments": 89,
+            "user": {"nickname": "系统提示", "avatar": "https://picsum.photos/50/50", "userid": "0"}
         }
 
 try:
@@ -35,7 +44,6 @@ try:
 except Exception as e:
     WRAPPER_ERROR = str(e)
     print(f"⚠️ Warning: Could not import or initialize xhs_ai_wrapper.\nError: {e}")
-    print(f"Current sys.path: {sys.path}")
     xhs_ai_wrapper = MockWrapper()
 
 
@@ -58,14 +66,25 @@ def get_valid_cookie(db: Session, user_id: int):
 def fetch_xhs_data(db: Session, user_id: Optional[int], url: str, manual_cookie: Optional[str] = None):
     """
     Attempts to fetch data using the root xhs_ai_wrapper.
+    Handles 'RuntimeUnavailableError' (missing Node.js) by falling back to Mock data.
     """
     
+    def _safe_fetch(cookie_val):
+        try:
+            return xhs_ai_wrapper.get_note_detail(url, cookie_val)
+        except Exception as e:
+            error_msg = str(e)
+            # Catch ExecJS runtime error (missing Node.js)
+            if "JavaScript runtime" in error_msg or "RuntimeUnavailableError" in error_msg:
+                print(f"⚠️ Runtime missing (ExecJS). Falling back to Mock.")
+                return MockWrapper().get_note_detail(url, cookie_val)
+            raise e
+
     # --- Local Mode / Direct Test ---
     if manual_cookie or (not user_id):
         try:
             # Use manual cookie or a placeholder if testing connectivity
-            data = xhs_ai_wrapper.get_note_detail(url, manual_cookie or "demo_cookie")
-            return data
+            return _safe_fetch(manual_cookie or "demo_cookie")
         except Exception as e:
             raise Exception(f"爬取失败: {str(e)}")
 
@@ -80,8 +99,7 @@ def fetch_xhs_data(db: Session, user_id: Optional[int], url: str, manual_cookie:
             raise e # No cookies left
             
         try:
-            data = xhs_ai_wrapper.get_note_detail(url, cookie_obj.value)
-            return data
+            return _safe_fetch(cookie_obj.value)
             
         except Exception as e:
             error_msg = str(e)

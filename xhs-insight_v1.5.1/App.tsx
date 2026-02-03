@@ -7,20 +7,69 @@ import AuthModal from './components/AuthModal';
 import { MOCK_RESULTS, MOCK_FOLDERS, MOCK_COOKIES } from './services/mockData';
 import { ScrapeResult, Cookie, Folder } from './types';
 
-// Help Modal Component
-const HelpModal = ({ onClose }: { onClose: () => void }) => (
-  <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black bg-opacity-50 p-4">
-    <div className="bg-white p-6 rounded-lg max-w-lg w-full max-h-[80vh] overflow-y-auto">
-      <h2 className="text-xl font-bold mb-4">如何使用 XHS-Insight</h2>
-      <ul className="list-disc list-inside space-y-2 text-gray-600 text-sm">
-        <li><strong>第一步:</strong> 进入“Cookie 资产”并粘贴有效的小红书网页版 Cookie。</li>
-        <li><strong>第二步:</strong> 在输入框中粘贴笔记链接（支持批量粘贴，自动提取链接）。</li>
-        <li><strong>第三步:</strong> 点击“立即分析”。爬虫将抓取数据，Gemini AI 将进行深度分析。</li>
-      </ul>
-      <button onClick={onClose} className="mt-6 w-full py-3 bg-gray-900 text-white rounded-lg font-medium">知道了</button>
+// Help Modal Component with Diagnostics
+const HelpModal = ({ onClose }: { onClose: () => void }) => {
+  const [testStatus, setTestStatus] = useState<string>('');
+  const [testLoading, setTestLoading] = useState(false);
+
+  const runDiagnostics = async () => {
+    setTestLoading(true);
+    setTestStatus('正在连接后端 /api/health ...');
+    try {
+      const res = await fetch('/api/health');
+      if (res.ok) {
+        const data = await res.json();
+        setTestStatus(`✅ 连接成功!\n后端状态: ${data.status}\nPython版本: ${data.python_version || 'Unknown'}`);
+      } else {
+        const text = await res.text();
+        setTestStatus(`❌ 连接失败 (Status ${res.status}):\n${text.substring(0, 100)}`);
+      }
+    } catch (e: any) {
+      setTestStatus(`❌ 网络错误: ${e.message}\n请检查后端服务是否启动。`);
+    } finally {
+      setTestLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black bg-opacity-50 p-4">
+      <div className="bg-white p-6 rounded-lg max-w-lg w-full max-h-[80vh] overflow-y-auto">
+        <h2 className="text-xl font-bold mb-4">如何使用 & 系统诊断</h2>
+        
+        <div className="mb-6">
+          <h3 className="font-bold text-gray-800 mb-2">使用指南</h3>
+          <ul className="list-disc list-inside space-y-2 text-gray-600 text-sm">
+            <li><strong>第一步:</strong> 进入“Cookie 资产”并粘贴有效的小红书网页版 Cookie。</li>
+            <li><strong>第二步:</strong> 在输入框中粘贴笔记链接（支持批量粘贴，自动提取链接）。</li>
+            <li><strong>第三步:</strong> 点击“立即分析”。</li>
+          </ul>
+        </div>
+
+        <div className="border-t border-gray-200 pt-4">
+          <h3 className="font-bold text-gray-800 mb-2">故障排查 (Diagnostics)</h3>
+          <p className="text-xs text-gray-500 mb-3">如果遇到“分析失败”或 Vercel 404 错误，请点击下方按钮测试后端连接。</p>
+          
+          <button 
+            onClick={runDiagnostics} 
+            disabled={testLoading}
+            className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded text-sm font-medium border border-gray-300 flex items-center gap-2"
+          >
+            {testLoading ? <i className="fa-solid fa-circle-notch fa-spin"></i> : <i className="fa-solid fa-stethoscope"></i>}
+            测试后端连接 (/api/health)
+          </button>
+
+          {testStatus && (
+            <div className="mt-3 p-3 bg-gray-900 text-green-400 font-mono text-xs rounded whitespace-pre-wrap">
+              {testStatus}
+            </div>
+          )}
+        </div>
+
+        <button onClick={onClose} className="mt-6 w-full py-3 bg-xhs-red text-white rounded-lg font-medium hover:bg-red-600">关闭</button>
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 const App: React.FC = () => {
   // Auth State
@@ -163,10 +212,20 @@ const App: React.FC = () => {
           });
           
           if (!res.ok) {
-             const err = await res.json();
-             // Don't stop the whole batch for one failure, just log alert or continue
-             console.error(`Link ${i+1} failed:`, err);
-             // Optional: Add a "Failed" card to results? For now, we just skip.
+             const contentType = res.headers.get("content-type");
+             let errorDetail = "未知错误";
+             
+             if (contentType && contentType.indexOf("application/json") !== -1) {
+                const err = await res.json();
+                errorDetail = err.detail || JSON.stringify(err);
+             } else {
+                const text = await res.text();
+                // If it's HTML (Vercel 404/500), take a snippet
+                errorDetail = `Server Error (${res.status}): ${text.substring(0, 150)}...`;
+             }
+             
+             console.error(`Link ${i+1} failed:`, errorDetail);
+             alert(`链接 ${i+1} 分析失败: ${errorDetail}`);
              continue; 
           }
           
@@ -198,6 +257,7 @@ const App: React.FC = () => {
           setResults(prev => [newResult, ...prev]);
         } catch (e: any) {
           console.error(`Error processing ${currentUrl}:`, e.message);
+          alert(`请求异常: ${e.message}`);
         }
     }
 

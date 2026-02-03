@@ -246,7 +246,7 @@ def analyze_note(request: NoteRequest, db: Session = Depends(get_db), current_us
             3. 'psychology': The target audience psychology.
             """
             
-            # Update: Switching to gemini-3-flash-preview as requested
+            # Using Gemini 3.0 Flash Preview as requested
             response = client.models.generate_content(
                 model='gemini-3-flash-preview',
                 contents=prompt

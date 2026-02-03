@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 @File    : xhs_ai_wrapper.py
-@Description : 小红书爬虫通用接口（运行时路径自动纠正版）
+@Description : 小红书爬虫通用接口（运行时路径自动纠正版 - Lazy Import）
 """
 import sys
 import os
@@ -21,48 +21,37 @@ for name in possible_spider_names:
         break
 
 if spider_root_path:
-    sys.path.append(spider_root_path)
-    logger.remove()
-    logger.add(sys.stderr, level="INFO")
-    
-    # 导入时的临时跳转（为了加载模块）
-    original_cwd = os.getcwd()
-    try:
-        os.chdir(spider_root_path)
-        from apis.xhs_pc_apis import XHS_Apis
-        logger.info(f"✅ 成功从 {spider_root_path} 加载核心模块")
-    except ImportError as e:
-        logger.error(f"❌ 导入失败: {e}")
-        os.chdir(original_cwd)
-        sys.exit(1)
-    finally:
-        os.chdir(original_cwd)
+    # Add spider path to sys.path so we can import its modules later
+    if spider_root_path not in sys.path:
+        sys.path.append(spider_root_path)
 else:
-    logger.error("❌ 未找到爬虫文件夹！")
-    sys.exit(1)
+    logger.warning("❌ 未找到爬虫文件夹！将无法使用真实爬虫功能。")
 # ===============================================
 
 class XHS_Wrapper:
     def __init__(self):
         """ 初始化：从爬虫文件夹内部加载 .env Cookie """
         self.spider_path = spider_root_path
+        if not self.spider_path:
+             logger.error("Spider path not set. Wrapper initialized in broken state.")
+             self.cookie = None
+             return
+
         env_path = os.path.join(self.spider_path, ".env")
         
-        if not os.path.exists(env_path):
-            raise FileNotFoundError(f"❌ 未找到配置文件: {env_path}")
-            
-        load_dotenv(env_path, override=True)
-        self.cookie = os.getenv("COOKIES")
+        # Load Env
+        if os.path.exists(env_path):
+            load_dotenv(env_path, override=True)
+            self.cookie = os.getenv("COOKIES")
+        else:
+            self.cookie = None
+            logger.warning(f"⚠️ Warning: {env_path} not found.")
         
-        if not self.cookie:
-            raise ValueError(f"❌ {env_path} 中未找到 'COOKIES' 变量")
-
-        # 初始化 API
-        # 这里也要用上下文管理器，防止初始化时读取文件报错
-        with self._spider_context():
-            self.api = XHS_Apis()
-            
-        logger.info(f"✅ 爬虫服务初始化成功")
+        # We DO NOT instantiate the API class here to avoid triggering top-level execution
+        # of the spider's dependencies (like execjs) during module import.
+        # The instantiation happens lazily in the methods.
+        self.api_instance = None
+        logger.info(f"✅ 爬虫 Wrapper 初始化完成 (Lazy Mode)")
 
     @contextmanager
     def _spider_context(self):
@@ -71,6 +60,10 @@ class XHS_Wrapper:
         在执行代码块前，自动跳进爬虫目录；
         执行完后，自动跳回原目录。
         """
+        if not self.spider_path:
+            yield
+            return
+
         original_cwd = os.getcwd()
         try:
             # 切换到爬虫目录，这样 read('./static/xxx.js') 才能找到文件
@@ -80,12 +73,32 @@ class XHS_Wrapper:
             # 无论是否报错，都要切回来，保证程序稳健
             os.chdir(original_cwd)
 
-    def search_notes(self, keyword: str, limit: int = 10, sort_type: int = 0) -> dict:
-        """ 搜索笔记 """
-        # 使用 with 语句包裹，运行时自动切换目录
+    def _get_api(self):
+        """ Lazy Loader for API Instance """
+        if self.api_instance:
+            return self.api_instance
+            
+        # Import happens HERE, inside the directory context
         with self._spider_context():
             try:
-                success, msg, notes_raw = self.api.search_some_note(
+                from apis.xhs_pc_apis import XHS_Apis
+                self.api_instance = XHS_Apis()
+                return self.api_instance
+            except ImportError as e:
+                logger.error(f"❌ Failed to import XHS_Apis: {e}")
+                raise e
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize XHS_Apis: {e}")
+                raise e
+
+    def search_notes(self, keyword: str, limit: int = 10, sort_type: int = 0) -> dict:
+        """ 搜索笔记 """
+        if not self.spider_path: return self._fail("爬虫目录未找到")
+
+        with self._spider_context():
+            try:
+                api = self._get_api()
+                success, msg, notes_raw = api.search_some_note(
                     keyword, limit, self.cookie, sort_type, 
                     0, 0, 0, 0, None, None
                 )
@@ -107,12 +120,16 @@ class XHS_Wrapper:
             except Exception as e:
                 return self._fail(str(e))
 
-    def get_note_detail(self, note_url: str) -> dict:
+    def get_note_detail(self, note_url: str, cookie: str = None) -> dict:
         """ 获取单篇笔记详情 """
-        # 使用 with 语句包裹
+        if not self.spider_path: return self._fail("爬虫目录未找到")
+        
+        use_cookie = cookie if cookie else self.cookie
+
         with self._spider_context():
             try:
-                success, msg, res = self.api.get_note_info(note_url, self.cookie)
+                api = self._get_api()
+                success, msg, res = api.get_note_info(note_url, use_cookie)
                 if not success:
                     return self._fail(msg)
 
@@ -132,12 +149,16 @@ class XHS_Wrapper:
                 result = {
                     "title": note.get('title'),
                     "desc": note.get('desc'),
-                    "stats": note.get('interact_info'),
-                    "images": images
+                    "images_list": images,
+                    "likes": note.get('interact_info', {}).get('liked_count', 0),
+                    "collected": note.get('interact_info', {}).get('collected_count', 0),
+                    "comments": note.get('interact_info', {}).get('comment_count', 0),
+                    "user": note.get('user', {})
                 }
-                return self._success(result, "note_detail")
+                return result # Direct return for service use
             except Exception as e:
-                return self._fail(str(e))
+                logger.error(f"Error in get_note_detail: {e}")
+                raise e
 
     def _success(self, data, type_name):
         return {"status": "success", "type": type_name, "data": data}

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 @File    : xhs_ai_wrapper.py
-@Description : 小红书爬虫通用接口（运行时路径自动纠正版 - Lazy Import）
+@Description : 小红书爬虫通用接口（运行时路径自动纠正版 - Lazy Import + Runtime Check）
 """
 import sys
 import os
@@ -26,12 +26,15 @@ if spider_root_path:
         sys.path.append(spider_root_path)
 else:
     logger.warning("❌ 未找到爬虫文件夹！将无法使用真实爬虫功能。")
+
 # ===============================================
 
 class XHS_Wrapper:
     def __init__(self):
         """ 初始化：从爬虫文件夹内部加载 .env Cookie """
         self.spider_path = spider_root_path
+        self.js_runtime_available = True  # Assume true initially
+        
         if not self.spider_path:
              logger.error("Spider path not set. Wrapper initialized in broken state.")
              self.cookie = None
@@ -45,13 +48,31 @@ class XHS_Wrapper:
             self.cookie = os.getenv("COOKIES")
         else:
             self.cookie = None
-            logger.warning(f"⚠️ Warning: {env_path} not found.")
         
-        # We DO NOT instantiate the API class here to avoid triggering top-level execution
-        # of the spider's dependencies (like execjs) during module import.
-        # The instantiation happens lazily in the methods.
         self.api_instance = None
-        logger.info(f"✅ 爬虫 Wrapper 初始化完成 (Lazy Mode)")
+        # Check ExecJS early
+        self._check_js_runtime()
+        logger.info(f"✅ 爬虫 Wrapper 初始化完成 (Runtime Available: {self.js_runtime_available})")
+
+    def _check_js_runtime(self):
+        """Pre-check if a JS runtime (Node.js) is available."""
+        try:
+            import execjs
+            # Attempt to locate a runtime. 
+            # execjs.get() throws RuntimeUnavailableError if no runtime is found.
+            # On some systems, it might default to JScript (Windows) which often fails for complex JS.
+            runtime = execjs.get() 
+            if not runtime:
+                raise Exception("No JS Runtime found")
+            
+            # Try a simple compilation
+            ctx = execjs.compile("function test() { return 1+1; }")
+            if ctx.call("test") != 2:
+                raise Exception("JS Execution Verification Failed")
+                
+        except Exception as e:
+            self.js_runtime_available = False
+            logger.warning(f"⚠️ JS Runtime Check Failed: {e}. Crawler will not work. System will use Mock Mode.")
 
     @contextmanager
     def _spider_context(self):
@@ -66,19 +87,20 @@ class XHS_Wrapper:
 
         original_cwd = os.getcwd()
         try:
-            # 切换到爬虫目录，这样 read('./static/xxx.js') 才能找到文件
             os.chdir(self.spider_path)
             yield
         finally:
-            # 无论是否报错，都要切回来，保证程序稳健
             os.chdir(original_cwd)
 
     def _get_api(self):
         """ Lazy Loader for API Instance """
+        if not self.js_runtime_available:
+            # Raise specific error that our service layer looks for
+            raise RuntimeError("RuntimeUnavailableError: Missing Node.js")
+
         if self.api_instance:
             return self.api_instance
             
-        # Import happens HERE, inside the directory context
         with self._spider_context():
             try:
                 from apis.xhs_pc_apis import XHS_Apis
@@ -86,17 +108,20 @@ class XHS_Wrapper:
                 return self.api_instance
             except ImportError as e:
                 logger.error(f"❌ Failed to import XHS_Apis: {e}")
-                raise e
+                # Mark runtime as unavailable if import fails likely due to js deps
+                self.js_runtime_available = False
+                raise RuntimeError(f"RuntimeUnavailableError: {str(e)}")
             except Exception as e:
                 logger.error(f"❌ Failed to initialize XHS_Apis: {e}")
-                raise e
+                self.js_runtime_available = False
+                raise RuntimeError(f"RuntimeUnavailableError: {str(e)}")
 
     def search_notes(self, keyword: str, limit: int = 10, sort_type: int = 0) -> dict:
         """ 搜索笔记 """
         if not self.spider_path: return self._fail("爬虫目录未找到")
-
-        with self._spider_context():
-            try:
+        
+        try:
+            with self._spider_context():
                 api = self._get_api()
                 success, msg, notes_raw = api.search_some_note(
                     keyword, limit, self.cookie, sort_type, 
@@ -117,8 +142,9 @@ class XHS_Wrapper:
                             "user": note.get('user', {}).get('nickname', '')
                         })
                 return self._success(clean_notes, "search_result")
-            except Exception as e:
-                return self._fail(str(e))
+        except Exception as e:
+            # Let service layer handle "RuntimeUnavailableError"
+            raise e
 
     def get_note_detail(self, note_url: str, cookie: str = None) -> dict:
         """ 获取单篇笔记详情 """
@@ -126,8 +152,8 @@ class XHS_Wrapper:
         
         use_cookie = cookie if cookie else self.cookie
 
-        with self._spider_context():
-            try:
+        try:
+            with self._spider_context():
                 api = self._get_api()
                 success, msg, res = api.get_note_info(note_url, use_cookie)
                 if not success:
@@ -155,10 +181,10 @@ class XHS_Wrapper:
                     "comments": note.get('interact_info', {}).get('comment_count', 0),
                     "user": note.get('user', {})
                 }
-                return result # Direct return for service use
-            except Exception as e:
-                logger.error(f"Error in get_note_detail: {e}")
-                raise e
+                return result 
+        except Exception as e:
+            # Ensure exception propagates so service layer can catch it and switch to mock
+            raise e
 
     def _success(self, data, type_name):
         return {"status": "success", "type": type_name, "data": data}

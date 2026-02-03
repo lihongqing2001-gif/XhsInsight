@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Request
+from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
@@ -7,6 +8,7 @@ from typing import List, Optional
 from datetime import datetime, timedelta
 import os
 import re
+import sys
 import jwt
 from passlib.context import CryptContext
 
@@ -172,6 +174,25 @@ def get_cookies(db: Session = Depends(get_db), current_user: User = Depends(get_
     cookies = db.query(Cookie).filter(Cookie.user_id == current_user.id).all()
     return [{"id": str(c.id), "value": c.value, "note": c.note, "status": "active" if c.is_valid else "invalid"} for c in cookies]
 
+# --- Debugging Endpoints ---
+@app.get("/api/health")
+def health_check():
+    """Simple health check to verify backend is running."""
+    return {
+        "status": "ok", 
+        "message": "Backend is reachable", 
+        "python_version": sys.version,
+        "time": datetime.utcnow().isoformat()
+    }
+
+@app.get("/api/analyze")
+def analyze_get_debug():
+    """Catch GET requests to analyze and return a helpful error."""
+    return JSONResponse(
+        status_code=405, 
+        content={"detail": "Method Not Allowed. This endpoint expects a POST request with JSON body. If you see this in Vercel logs, the route is correctly mapped but the Method is wrong."}
+    )
+
 @app.post("/api/analyze")
 def analyze_note(request: NoteRequest, db: Session = Depends(get_db), current_user: Optional[User] = Depends(get_current_user_optional)):
     
@@ -199,7 +220,6 @@ def analyze_note(request: NoteRequest, db: Session = Depends(get_db), current_us
 
     try:
         # 1. Fetch Data via Crawler Service
-        # Pass user_id if authenticated, or manual_cookie if local
         raw_data = fetch_xhs_data(db, user_id, cleaned_url, manual_cookie=manual_cookie)
         
         # 2. Call Gemini API
@@ -226,19 +246,22 @@ def analyze_note(request: NoteRequest, db: Session = Depends(get_db), current_us
             3. 'psychology': The target audience psychology.
             """
             
+            # Use basic generate_content
             response = client.models.generate_content(
                 model='gemini-2.0-flash-exp',
                 contents=prompt
             )
             
             # Simple mock parsing for demo resilience
-            # In production, use structured output or response_schema for JSON
+            # In a real app, you would parse the JSON string from response.text
             ai_result["viral_reasons"] = ["内容分析成功", "吸引人的标题"]
             ai_result["psychology"] = "AI 分析完成"
             
         except ImportError:
-             ai_result["viral_reasons"] = ["后端缺少 AI 库", "请安装 google-genai"]
+             print("Error: google-genai library not found.")
+             ai_result["viral_reasons"] = ["后端环境错误: 缺少 google-genai 库"]
         except Exception as e:
+            print(f"Gemini API Error: {str(e)}")
             ai_result["viral_reasons"] = [f"AI Error: {str(e)}"]
 
         # 3. Save to DB (Only for logged-in users)
@@ -250,9 +273,9 @@ def analyze_note(request: NoteRequest, db: Session = Depends(get_db), current_us
             "cover_image": raw_data.get('images_list', [''])[0],
             "stats_json": {"likes": raw_data.get('likes', 0), "collects": raw_data.get('collected', 0), "comments": raw_data.get('comments', 0)},
             "author_json": raw_data.get('user', {}),
-            "ai_viral_reasons": ai_result['viral_reasons'],
-            "ai_improvements": ai_result['improvements'],
-            "ai_psychology": ai_result['psychology']
+            "ai_viral_reasons": ai_result.get('viral_reasons', []),
+            "ai_improvements": ai_result.get('improvements', []),
+            "ai_psychology": ai_result.get('psychology', '')
         }
 
         if current_user:
@@ -275,9 +298,12 @@ def analyze_note(request: NoteRequest, db: Session = Depends(get_db), current_us
         return {"status": "success", "data": result_data}
         
     except Exception as e:
-        if str(e) == "COOKIE_EXHAUSTED":
+        error_str = str(e)
+        if error_str == "COOKIE_EXHAUSTED":
             raise HTTPException(status_code=503, detail="无可用Cookie，请补充。")
-        raise HTTPException(status_code=500, detail=str(e))
+        
+        print(f"Crawler/Server Error: {error_str}")
+        raise HTTPException(status_code=500, detail=f"Internal Error: {error_str}")
 
 @app.get("/")
 def read_root():

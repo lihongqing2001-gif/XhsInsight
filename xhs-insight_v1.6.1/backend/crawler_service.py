@@ -21,8 +21,8 @@ def _get_mock_wrapper():
                 raise Exception("401 Unauthorized")
             return {
                 "title": "测试笔记 (Mock Mode)", 
-                "desc": f"【系统提示】\n这是演示数据。\n\nURL: {url}",
-                "images_list": ["https://picsum.photos/400/600"],
+                "desc": f"【系统提示】\n这是演示数据 (本地/Mock模式)。\n若您看到此信息，说明本地环境缺少 Node.js 运行时，无法执行真实爬虫。\n\nURL: {url}",
+                "images_list": ["https://picsum.photos/400/600", "https://picsum.photos/400/601"],
                 "likes": 888, "collected": 666, "comments": 10,
                 "user": {"nickname": "测试用户", "avatar": "https://picsum.photos/50/50", "userid": "0"}
             }
@@ -66,10 +66,21 @@ def get_valid_cookie(db: Session, user_id: int):
 
 def fetch_xhs_data(db: Session, user_id: Optional[int], url: str, manual_cookie: Optional[str] = None):
     crawler = _get_crawler()
+    mock_crawler = _get_mock_wrapper()
     
+    def safe_crawl(target_url, cookie_val):
+        try:
+            return crawler.get_note_detail(target_url, cookie_val)
+        except Exception as e:
+            err_msg = str(e)
+            if any(x in err_msg for x in ["JavaScript runtime", "RuntimeUnavailable", "Program", "execjs", "node"]):
+                print(f"⚠️ Runtime Error ({err_msg}). Falling back to Mock Data.")
+                return mock_crawler.get_note_detail(target_url, "mock_fallback")
+            raise e
+
     if manual_cookie or (not user_id):
         try:
-            return crawler.get_note_detail(url, manual_cookie or "demo")
+            return safe_crawl(url, manual_cookie or "demo")
         except Exception as e:
             raise Exception(f"Error: {str(e)}")
 
@@ -83,7 +94,7 @@ def fetch_xhs_data(db: Session, user_id: Optional[int], url: str, manual_cookie:
             raise e
             
         try:
-            return crawler.get_note_detail(url, cookie_obj.value)
+            return safe_crawl(url, cookie_obj.value)
         except Exception as e:
             error_msg = str(e)
             if "401" in error_msg or "Unauthorized" in error_msg:
